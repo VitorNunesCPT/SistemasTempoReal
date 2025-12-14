@@ -47,6 +47,14 @@ float medirDistancia(int trig, int echo) {
   return dur * 0.034 / 2;
 }
 
+// Cada sensor e tratado como uma tarefa separada, acionada pelo seu periodo.
+void tarefaSensor(unsigned long agora, int trig, int echo, float &distancia, unsigned long &tUltimaExec) {
+  if (agora - tUltimaExec >= PERIODO_SENSOR_MS) {
+    distancia = medirDistancia(trig, echo);
+    tUltimaExec = agora;
+  }
+}
+
 // ---------- LEI DE CONTROLE ----------
 int controlePWM(float d) {
   // Duty cresce exponencialmente ao afastar e decresce ao aproximar.
@@ -83,25 +91,10 @@ void loop() {
   unsigned long agora = millis();
 
   // -------- TAREFAS DOS SENSORES (cada sensor e uma tarefa) --------
-  if (agora - tSensorF >= PERIODO_SENSOR_MS) {
-    dF = medirDistancia(TRIG_F, ECHO_F);
-    tSensorF = agora;
-  }
-
-  if (agora - tSensorT >= PERIODO_SENSOR_MS) {
-    dT = medirDistancia(TRIG_T, ECHO_T);
-    tSensorT = agora;
-  }
-
-  if (agora - tSensorE >= PERIODO_SENSOR_MS) {
-    dE = medirDistancia(TRIG_E, ECHO_E);
-    tSensorE = agora;
-  }
-
-  if (agora - tSensorD >= PERIODO_SENSOR_MS) {
-    dD = medirDistancia(TRIG_D, ECHO_D);
-    tSensorD = agora;
-  }
+  tarefaSensor(agora, TRIG_F, ECHO_F, dF, tSensorF);
+  tarefaSensor(agora, TRIG_T, ECHO_T, dT, tSensorT);
+  tarefaSensor(agora, TRIG_E, ECHO_E, dE, tSensorE);
+  tarefaSensor(agora, TRIG_D, ECHO_D, dD, tSensorD);
 
   // -------- TAREFA DE CONTROLE DOS MOTORES (20 ms) --------
   if (agora - tMotores >= PERIODO_MOTOR_MS) {
