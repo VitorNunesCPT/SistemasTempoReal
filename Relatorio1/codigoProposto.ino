@@ -25,10 +25,17 @@ unsigned long tSensorD = 0;
 unsigned long tMotores = 0;
 unsigned long tLog     = 0;
 
-// ---------- DISTÂNCIAS ----------
+// ---------- DISTANCIAS ----------
 float dF, dT, dE, dD;
 
-// ---------- FUNÇÃO GENÉRICA ----------
+// ---------- CONTROLE ----------
+const float DISTANCIA_STOP_CM = 5.0;    // distancia minima de seguranca
+const float DISTANCIA_MAX_CM  = 100.0;  // distancia maxima considerada
+const float K_EXP             = 0.05;   // ganho da curva exponencial
+const int DUTY_MIN            = 0;      // limite inferior de duty
+const int DUTY_MAX            = 255;    // limite superior de duty
+
+// ---------- FUNCAO GENERICA ----------
 float medirDistancia(int trig, int echo) {
   digitalWrite(trig, LOW);
   delayMicroseconds(2);
@@ -42,18 +49,20 @@ float medirDistancia(int trig, int echo) {
 
 // ---------- LEI DE CONTROLE ----------
 int controlePWM(float d) {
-  float dStop = 5.0;    // distância mínima de segurança (cm)
-  float dMax  = 100.0;  // distância máxima considerada
-  float k = 0.05;
-
-  if (d <= dStop) {
-    return 0; // PARADA TOTAL
+  // Duty cresce exponencialmente ao afastar e decresce ao aproximar.
+  if (d <= 0) {
+    return 0; // leitura invalida ou muito proxima
   }
 
-  if (d > dMax) d = dMax;
+  float dClamped = constrain(d, DISTANCIA_STOP_CM, DISTANCIA_MAX_CM);
+  float x = dClamped - DISTANCIA_STOP_CM;          // afastamento em relacao ao limite seguro
+  float fatorExp = 1.0 - exp(-K_EXP * x);          // 0 ate a distancia de parada, tende a 1 em distancia alta
+  int pwm = DUTY_MIN + (int)((DUTY_MAX - DUTY_MIN) * fatorExp + 0.5f);
 
-  int pwm = 255 * (1 - exp(-k * (d - dStop)));
-  return constrain(pwm, 0, 255);
+  if (d <= DISTANCIA_STOP_CM) {
+    return 0; // parada total no limite de seguranca
+  }
+  return constrain(pwm, DUTY_MIN, DUTY_MAX);
 }
 
 
