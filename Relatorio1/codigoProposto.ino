@@ -14,8 +14,16 @@
 int motores[4] = {25, 26, 27, 14};
 
 // ---------- TEMPOS ----------
-unsigned long tSensores = 0;
-unsigned long tMotores  = 0;
+const unsigned long PERIODO_SENSOR_MS = 50;
+const unsigned long PERIODO_MOTOR_MS  = 20;
+const unsigned long PERIODO_LOG_MS    = 200;
+
+unsigned long tSensorF = 0;
+unsigned long tSensorT = 0;
+unsigned long tSensorE = 0;
+unsigned long tSensorD = 0;
+unsigned long tMotores = 0;
+unsigned long tLog     = 0;
 
 // ---------- DISTÂNCIAS ----------
 float dF, dT, dE, dD;
@@ -65,28 +73,43 @@ void setup() {
 void loop() {
   unsigned long agora = millis();
 
-  // -------- TAREFAS DOS SENSORES (50 ms) --------
-  if (agora - tSensores >= 50) {
+  // -------- TAREFAS DOS SENSORES (cada sensor e uma tarefa) --------
+  if (agora - tSensorF >= PERIODO_SENSOR_MS) {
     dF = medirDistancia(TRIG_F, ECHO_F);
+    tSensorF = agora;
+  }
+
+  if (agora - tSensorT >= PERIODO_SENSOR_MS) {
     dT = medirDistancia(TRIG_T, ECHO_T);
+    tSensorT = agora;
+  }
+
+  if (agora - tSensorE >= PERIODO_SENSOR_MS) {
     dE = medirDistancia(TRIG_E, ECHO_E);
+    tSensorE = agora;
+  }
+
+  if (agora - tSensorD >= PERIODO_SENSOR_MS) {
     dD = medirDistancia(TRIG_D, ECHO_D);
-
-    Serial.print("F: "); Serial.print(dF);
-    Serial.print(" | T: "); Serial.print(dT);
-    Serial.print(" | E: "); Serial.print(dE);
-    Serial.print(" | D: "); Serial.println(dD);
-
-    tSensores = agora;
+    tSensorD = agora;
   }
 
   // -------- TAREFA DE CONTROLE DOS MOTORES (20 ms) --------
-  if (agora - tMotores >= 20) {
+  if (agora - tMotores >= PERIODO_MOTOR_MS) {
     analogWrite(motores[0], controlePWM(dF));
     analogWrite(motores[1], controlePWM(dT));
     analogWrite(motores[2], controlePWM(dE));
     analogWrite(motores[3], controlePWM(dD));
 
     tMotores = agora;
+  }
+
+  // -------- TELEMETRIA (log agrupado) --------
+  if (agora - tLog >= PERIODO_LOG_MS) {
+    Serial.print("F: "); Serial.print(dF);
+    Serial.print(" | T: "); Serial.print(dT);
+    Serial.print(" | E: "); Serial.print(dE);
+    Serial.print(" | D: "); Serial.println(dD);
+    tLog = agora;
   }
 }
