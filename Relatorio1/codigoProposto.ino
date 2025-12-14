@@ -73,6 +73,17 @@ int controlePWM(float d) {
   return constrain(pwm, DUTY_MIN, DUTY_MAX);
 }
 
+// Tarefa unica de controle para os 4 motores (aplica duty de uma so vez)
+void tarefaControleMotores(unsigned long agora) {
+  if (agora - tMotores >= PERIODO_MOTOR_MS) {
+    analogWrite(motores[0], controlePWM(dF));
+    analogWrite(motores[1], controlePWM(dT));
+    analogWrite(motores[2], controlePWM(dE));
+    analogWrite(motores[3], controlePWM(dD));
+    tMotores = agora;
+  }
+}
+
 
 void setup() {
   Serial.begin(115200);
@@ -97,14 +108,7 @@ void loop() {
   tarefaSensor(agora, TRIG_D, ECHO_D, dD, tSensorD);
 
   // -------- TAREFA DE CONTROLE DOS MOTORES (20 ms) --------
-  if (agora - tMotores >= PERIODO_MOTOR_MS) {
-    analogWrite(motores[0], controlePWM(dF));
-    analogWrite(motores[1], controlePWM(dT));
-    analogWrite(motores[2], controlePWM(dE));
-    analogWrite(motores[3], controlePWM(dD));
-
-    tMotores = agora;
-  }
+  tarefaControleMotores(agora);
 
   // -------- TELEMETRIA (log agrupado) --------
   if (agora - tLog >= PERIODO_LOG_MS) {
