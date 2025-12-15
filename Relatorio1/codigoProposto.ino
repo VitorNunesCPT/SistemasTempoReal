@@ -14,16 +14,17 @@
 int motores[4] = {25, 26, 27, 14};
 
 // ---------- TEMPOS ----------
-const unsigned long PERIODO_SENSOR_MS = 50;
-const unsigned long PERIODO_MOTOR_MS  = 20;
-const unsigned long PERIODO_LOG_MS    = 200;
+const unsigned long PERIODO_SENSOR_MS = 50;  // alvo de cada tarefa de sensor
+const unsigned long PERIODO_MOTOR_MS  = 20;  // alvo da tarefa unica de controle
+const unsigned long PERIODO_LOG_MS    = 200; // telemetria para verificacao
+const unsigned long FRAME_MS          = 10;  // frame do executivo ciclico
+const unsigned int FRAMES_HIPER       = 20;  // hiperperiodo 200 ms (20 frames)
+const unsigned int SENSOR_PERIOD_FRAMES = PERIODO_SENSOR_MS / FRAME_MS; // 5
+const unsigned int MOTOR_PERIOD_FRAMES  = PERIODO_MOTOR_MS  / FRAME_MS; // 2
+const unsigned int LOG_PERIOD_FRAMES    = PERIODO_LOG_MS    / FRAME_MS; // 20
 
-unsigned long tSensorF = 0;
-unsigned long tSensorT = 0;
-unsigned long tSensorE = 0;
-unsigned long tSensorD = 0;
-unsigned long tMotores = 0;
-unsigned long tLog     = 0;
+unsigned long proximoFrameMs = 0;
+unsigned int frameIndex = 0;
 
 // ---------- DISTANCIAS ----------
 float dF, dT, dE, dD;
@@ -47,12 +48,9 @@ float medirDistancia(int trig, int echo) {
   return dur * 0.034 / 2;
 }
 
-// Cada sensor e tratado como uma tarefa separada, acionada pelo seu periodo.
-void tarefaSensor(unsigned long agora, int trig, int echo, float &distancia, unsigned long &tUltimaExec) {
-  if (agora - tUltimaExec >= PERIODO_SENSOR_MS) {
-    distancia = medirDistancia(trig, echo);
-    tUltimaExec = agora;
-  }
+// Cada sensor e tratado como uma tarefa separada dentro do frame.
+void tarefaSensor(int trig, int echo, float &distancia) {
+  distancia = medirDistancia(trig, echo);
 }
 
 // ---------- LEI DE CONTROLE ----------
@@ -74,19 +72,17 @@ int controlePWM(float d) {
 }
 
 // Tarefa unica de controle para os 4 motores (aplica duty de uma so vez)
-void tarefaControleMotores(unsigned long agora) {
-  if (agora - tMotores >= PERIODO_MOTOR_MS) {
-    analogWrite(motores[0], controlePWM(dF));
-    analogWrite(motores[1], controlePWM(dT));
-    analogWrite(motores[2], controlePWM(dE));
-    analogWrite(motores[3], controlePWM(dD));
-    tMotores = agora;
-  }
+void tarefaControleMotores() {
+  analogWrite(motores[0], controlePWM(dF));
+  analogWrite(motores[1], controlePWM(dT));
+  analogWrite(motores[2], controlePWM(dE));
+  analogWrite(motores[3], controlePWM(dD));
 }
 
 
 void setup() {
   Serial.begin(115200);
+  proximoFrameMs = millis() + FRAME_MS;
 
   pinMode(TRIG_F, OUTPUT); pinMode(ECHO_F, INPUT);
   pinMode(TRIG_T, OUTPUT); pinMode(ECHO_T, INPUT);
@@ -99,23 +95,49 @@ void setup() {
 }
 
 void loop() {
-  unsigned long agora = millis();
+  unsigned long inicioFrameUs = micros();
 
-  // -------- TAREFAS DOS SENSORES (cada sensor e uma tarefa) --------
-  tarefaSensor(agora, TRIG_F, ECHO_F, dF, tSensorF);
-  tarefaSensor(agora, TRIG_T, ECHO_T, dT, tSensorT);
-  tarefaSensor(agora, TRIG_E, ECHO_E, dE, tSensorE);
-  tarefaSensor(agora, TRIG_D, ECHO_D, dD, tSensorD);
+  // ---------- EXECUTIVO CICLICO POR FRAME ----------
+  // Distribuicao das tarefas de sensor ao longo dos frames (offsets diferentes para periodos de 50 ms).
+  switch (frameIndex % SENSOR_PERIOD_FRAMES) {
+    case 0: tarefaSensor(TRIG_F, ECHO_F, dF); break;
+    case 1: tarefaSensor(TRIG_T, ECHO_T, dT); break;
+    case 2: tarefaSensor(TRIG_E, ECHO_E, dE); break;
+    case 3: tarefaSensor(TRIG_D, ECHO_D, dD); break;
+    default: break; // frame 4: descanso, fecha o periodo de 50 ms
+  }
 
-  // -------- TAREFA DE CONTROLE DOS MOTORES (20 ms) --------
-  tarefaControleMotores(agora);
+  // Controle de motores a cada 20 ms (um frame sim, outro nao).
+  if (frameIndex % MOTOR_PERIOD_FRAMES == 0) {
+    tarefaControleMotores();
+  }
 
-  // -------- TELEMETRIA (log agrupado) --------
-  if (agora - tLog >= PERIODO_LOG_MS) {
-    Serial.print("F: "); Serial.print(dF);
+  // Telemetria a cada 200 ms (hiperperiodo)
+  if (frameIndex % LOG_PERIOD_FRAMES == 0) {
+    Serial.print("[LOG] F: "); Serial.print(dF);
     Serial.print(" | T: "); Serial.print(dT);
     Serial.print(" | E: "); Serial.print(dE);
     Serial.print(" | D: "); Serial.println(dD);
-    tLog = agora;
   }
+
+  // ---------- VERIFICACAO DE DEADLINE DO FRAME ----------
+  unsigned long duracaoUs = micros() - inicioFrameUs;
+  if (duracaoUs > FRAME_MS * 1000UL) {
+    Serial.print("[OVERRUN] frame "); Serial.print(frameIndex);
+    Serial.print(" dur(us)="); Serial.print(duracaoUs);
+    Serial.print(" budget(us)="); Serial.println(FRAME_MS * 1000UL);
+  }
+
+  // ---------- ESPERA ATE O PROXIMO FRAME ----------
+  long atrasoMs = (long)(proximoFrameMs - millis());
+  if (atrasoMs > 0) {
+    delay(atrasoMs);
+  } else if (atrasoMs < 0) {
+    Serial.print("[ATRASO] frame "); Serial.print(frameIndex);
+    Serial.print(" atraso(ms)="); Serial.println(-atrasoMs);
+    // nao fazemos catch-up agressivo; seguimos para o proximo frame para evitar jitter acumulado
+  }
+
+  frameIndex = (frameIndex + 1) % FRAMES_HIPER;
+  proximoFrameMs += FRAME_MS;
 }
