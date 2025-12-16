@@ -39,23 +39,45 @@
 
 - Cálculo de viabilidade (preencher após medições): `Tcomp_total_frame` ≤ `FRAME_MS * 1000`. Se overrun: ajustar `FRAME_MS` ou reduzir timeout do `pulseIn`.
 
+### Registro de testes e ajustes de tempo
+- Teste 1 (log coletado): `FRAME_MS=10 ms`, timeout padrão do `pulseIn` (30 ms). Resultado: `Tcomp` de sensor chegou a ~24 ms (frames 1, 6, 11, 16 com `[OVERRUN]` de ~24.0 ms), não cabe no frame de 10 ms → atraso acumulado ~1,5 s.
+- Ajuste proposto: reduzir timeout do `pulseIn` (ex.: 8000–10000 µs) ou aumentar `FRAME_MS` (ex.: 25–30 ms) e recalcular hiperperíodo para evitar overrun.
+- Próximo passo de medição: repetir com novo timeout/frame e atualizar a tabela de Tcomp (min/méd/máx) para cada tarefa.
+
 ## 4. Tarefa 2 – Diagramas de Fluxo Temporal e Viabilidade
 - Ciclo único maior (hiperperíodo 200 ms, frames de 10 ms):
-  - Frame 0: Sensor F + Controle + Log
-  - Frame 1: Sensor T
-  - Frame 2: Sensor E + Controle
-  - Frame 3: Sensor D
-  - Frame 4: (folga) + Controle
-  - Frames 5–9: repetição do padrão de sensores a cada 5 frames; controle em frames pares; log no início do próximo hiperperíodo.
-  - Verificar se cada slot suporta o Tcomp medido; registrar folga/reserva por frame.
+  - Tabela do hiperperíodo (cada coluna = frame de 10 ms):
+
+    ```
+    Frame:   0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15   16   17   18   19
+    Sensor:  F         E         -    F         E         -    F         E         -    F         E         -
+    Sensor:       T         D         T         D              T         D              T         D
+    Controle: C         C         C         C         C         C         C         C         C         C
+    Log:     LOG                                                                                              
+    ```
+
+    - Sensor: cada um a cada 50 ms (offsets diferentes).
+    - Controle: a cada 20 ms (frames pares).
+    - Log: a cada 200 ms (frame 0 do hiperperíodo).
+    - A preencher: folga por frame = `10.000 µs - Tcomp(frame)`.
+
 - Sistema de ciclos menor/maior:
-  - Ciclo menor (ex.: 10–20 ms): controle de motores.
-  - Ciclo maior (50 ms): cada sensor uma vez por ciclo; log no alinhamento do ciclo maior (200 ms).
-  - Avaliar alinhamento: controle roda 2–5 vezes entre leituras de sensor; verificar se leituras com `pulseIn` cabem no slot do ciclo maior sem bloquear o menor.
-- Viabilidade (a preencher após medições):
+  - Ciclo menor (controle): 20 ms (ou 10 ms se reduzido), roda 2–5 vezes entre leituras dos sensores.
+  - Ciclo maior (sensores): 50 ms, com offsets SF, ST, SE, SD em 4 subslots de ~10 ms cada; log a cada 200 ms.
+  - Visualização simplificada (50 ms):
+
+    ```
+    t=0ms    t=10ms   t=20ms   t=30ms   t=40ms   t=50ms
+    SF       ST       SE       SD       (folga/log opcional)   -> repete
+    Cn roda a cada 20 ms (ou 10 ms) dentro do ciclo: C0, C1, C2...
+    ```
+
+  - Avaliação: verificar se Tcomp_sensor + Tcomp_controle cabem nos slots sem bloquear o ciclo menor; documentar folga.
+
+- Viabilidade (marcar após medições):
   - [ ] Ciclo único maior atende deadlines sem overrun.
   - [ ] Combinação ciclo menor/maior atende deadlines sem interferência.
-  - Observações sobre jitter e folga.
+  - Observações: registrar jitter observado e margem de folga em µs para cada slot.
 
 ## 5. Resultados de Simulação (Wokwi)
 - Evidências a incluir:
@@ -63,6 +85,27 @@
   - Tabela de distância vs duty aplicado para mostrar resposta da lei exponencial.
   - Screenshots ou trechos do Serial Monitor.
 - Estado da simulação: preencher após execução.
+- Topologia simulada (imagem anexada pelo aluno):
+  - Placa ESP32 com 4 sensores HC-SR04 distribuídos (frente, trás, esquerda, direita) e LEDs de indicação por setor.
+  - Ligações padrão HC-SR04 (VCC=5V, GND comum, TRIG/ECHO nos pinos definidos no código).
+  - Alimentação e GND compartilhados; fios verdes para sinais, vermelho VCC, preto GND.
+
+### Log coletado (recorte)
+```
+[LOG] F: 2.04 | T: 0.00 | E: 0.00 | D: 0.00
+[OVERRUN] frame 1 dur(us)=23877 budget(us)=10000
+[ATRASO] frame 1 atraso(ms)=1514
+...
+[LOG] F: 2.09 | T: 399.92 | E: 1.92 | D: 2.01
+[OVERRUN] frame 1 dur(us)=23920 budget(us)=10000
+...
+[OVERRUN] frame 16 dur(us)=24075 budget(us)=10000
+```
+
+### Observações do log
+- Overrun recorrente em frames com leitura de sensor (`pulseIn` chegando a ~24 ms) excedendo o budget de 10 ms.
+- Atrasos acumulados ~1,4–1,5 s após sequência de overruns, indicando que o frame de 10 ms não comporta o pior caso de leitura.
+- Próximo ajuste sugerido: aumentar `FRAME_MS` (ex.: 25–30 ms) ou reduzir timeout do `pulseIn` para caber no slot; re-escalar o hiperperíodo e recalcular a tabela de frames.
 
 ## 6. Ajustes de Tempo
 - Ajustes realizados (preencher):
