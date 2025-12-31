@@ -32,6 +32,7 @@ const int DUTY_MAX = 255;               // limite superior de duty
 enum EstatId { EST_SF, EST_ST, EST_SE, EST_SD, EST_CTRL, EST_LOG, EST_COUNT };
 uint64_t estatMin[EST_COUNT];
 uint64_t estatMax[EST_COUNT];
+uint64_t estatSum[EST_COUNT];
 bool estatSeen[EST_COUNT];
 uint64_t inicioRelUs = 0;
 uint32_t ciclos[EST_COUNT];
@@ -42,6 +43,7 @@ void resetEstat() {
   for (int i = 0; i < EST_COUNT; i++) {
     estatMin[i] = UINT64_MAX;
     estatMax[i] = 0;
+    estatSum[i] = 0;
     estatSeen[i] = false;
     ciclos[i] = 0;
     misses[i] = 0;
@@ -53,6 +55,22 @@ inline void atualizaEstat(int id, uint64_t durUs) {
   estatSeen[id] = true;
   if (durUs < estatMin[id]) estatMin[id] = durUs;
   if (durUs > estatMax[id]) estatMax[id] = durUs;
+  estatSum[id] += durUs;
+}
+
+void printMinMedMax(const char* nome, int id) {
+  Serial.print(nome);
+  Serial.print(":");
+  if (!estatSeen[id] || ciclos[id] == 0) {
+    Serial.print("-/-/-");
+    return;
+  }
+  uint64_t med = estatSum[id] / ciclos[id];
+  Serial.print(estatMin[id]);
+  Serial.print("/");
+  Serial.print(med);
+  Serial.print("/");
+  Serial.print(estatMax[id]);
 }
 
 // ---------- SINCRONIZACAO ----------
@@ -151,16 +169,12 @@ void tarefaLog(void* pv) {
     Serial.print(" | T: "); Serial.print(lt);
     Serial.print(" | E: "); Serial.print(le);
     Serial.print(" | D: "); Serial.print(ld);
-    Serial.print(" | Tmax(us) SF/ ST/ SE/ SD/ CTRL: ");
-    if (estatSeen[EST_SF]) { Serial.print(estatMax[EST_SF]); } else { Serial.print("-"); }
-    Serial.print(" / ");
-    if (estatSeen[EST_ST]) { Serial.print(estatMax[EST_ST]); } else { Serial.print("-"); }
-    Serial.print(" / ");
-    if (estatSeen[EST_SE]) { Serial.print(estatMax[EST_SE]); } else { Serial.print("-"); }
-    Serial.print(" / ");
-    if (estatSeen[EST_SD]) { Serial.print(estatMax[EST_SD]); } else { Serial.print("-"); }
-    Serial.print(" / ");
-    if (estatSeen[EST_CTRL]) { Serial.print(estatMax[EST_CTRL]); } else { Serial.print("-"); }
+    Serial.print(" | Tcomp(us) min/med/max ");
+    printMinMedMax("SF", EST_SF); Serial.print(" ");
+    printMinMedMax("ST", EST_ST); Serial.print(" ");
+    printMinMedMax("SE", EST_SE); Serial.print(" ");
+    printMinMedMax("SD", EST_SD); Serial.print(" ");
+    printMinMedMax("CTRL", EST_CTRL);
     Serial.print(" | ciclos SF/ST/SE/SD/CTRL: ");
     Serial.print(ciclos[EST_SF]); Serial.print("/");
     Serial.print(ciclos[EST_ST]); Serial.print("/");
