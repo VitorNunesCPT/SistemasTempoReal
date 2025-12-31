@@ -1,0 +1,78 @@
+#include <Arduino.h>
+#include <FreeRTOS.h>
+#include <queue.h>
+
+// Ajuste os pinos conforme seu hardware (ex.: ESP32 ou Arduino UNO).
+static const uint8_t BUTTON_PINS[8] = {2, 3, 4, 5, 6, 7, 8, 9};   // PORTD (entrada)
+static const uint8_t LED_PINS[8]    = {10, 11, 12, 13, 14, 15, 16, 17}; // PORTB (saida)
+
+QueueHandle_t fila;
+
+// Le os 8 bits dos botoes como um byte.
+uint8_t lerPortD() {
+  uint8_t valor = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    int leitura = digitalRead(BUTTON_PINS[i]);
+    // Considera nivel baixo como pressionado se usar pull-up.
+    if (leitura == LOW) {
+      valor |= (1 << i);
+    }
+  }
+  return valor;
+}
+
+// Escreve o byte nos 8 LEDs.
+void escreverPortB(uint8_t valor) {
+  for (uint8_t i = 0; i < 8; i++) {
+    bool bitLigado = valor & (1 << i);
+    digitalWrite(LED_PINS[i], bitLigado ? HIGH : LOW);
+  }
+}
+
+void _Ler_botoes(void *pv) {
+  const TickType_t periodo = pdMS_TO_TICKS(20);  // ajuste conforme necessidade
+  TickType_t t0 = xTaskGetTickCount();
+  for (;;) {
+    uint8_t estado = lerPortD();
+    // Para fila de tamanho 1, sobrescreve o valor anterior sem bloquear.
+    xQueueOverwrite(fila, &estado);
+    vTaskDelayUntil(&t0, periodo);
+  }
+}
+
+void LED_acende(void *pv) {
+  const TickType_t espera = pdMS_TO_TICKS(50); // ajustar para avaliar timeout/deadlock
+  for (;;) {
+    uint8_t valor;
+    if (xQueueReceive(fila, &valor, espera) == pdTRUE) {
+      escreverPortB(valor);
+    } else {
+      // Timeout opcional: manter estado anterior ou definir seguro.
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  for (uint8_t i = 0; i < 8; i++) {
+    pinMode(BUTTON_PINS[i], INPUT_PULLUP); // pull-up interno para botoes
+    pinMode(LED_PINS[i], OUTPUT);
+    digitalWrite(LED_PINS[i], LOW);
+  }
+
+  fila = xQueueCreate(1, sizeof(uint8_t)); // fila de 1 byte
+  if (fila == NULL) {
+    Serial.println("Erro ao criar fila");
+    for (;;) {
+      delay(1000);
+    }
+  }
+
+  // Prioridades iguais; ajuste se precisar de menor latencia no consumidor.
+  xTaskCreate(_Ler_botoes, "ler_btn", 256, NULL, 2, NULL);
+  xTaskCreate(LED_acende, "leds", 256, NULL, 2, NULL);
+}
+
+void loop() {
+  // Nao usado; FreeRTOS executa as tarefas.
+}
