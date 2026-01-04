@@ -1,238 +1,247 @@
-// ---------- CONFIGURACAO GERAL ----------
-#include <Arduino.h>
 
-// ---------- PINOS ----------
+
+// ---------------- PINOS (Ultrassom) ----------------
 #define TRIG_F 4
 #define ECHO_F 16
+
 #define TRIG_T 17
 #define ECHO_T 5
+
 #define TRIG_E 18
 #define ECHO_E 19
+
 #define TRIG_D 21
 #define ECHO_D 22
 
+// ---------------- MOTORES (PWM LEDC por PINO) ----------------
+// Use um LED (com resistor) em um desses pinos para teste.
 int motores[4] = {25, 26, 27, 14};
 
-// ---------- PERIODOS (MS) ----------
-const uint32_t PERIODO_SENSOR_MS = 50;   // alvo de cada tarefa de sensor
-const uint32_t PERIODO_CONTROLE_MS = 20; // alvo da tarefa de controle
-const uint32_t PERIODO_LOG_MS = 200;     // janela de telemetria
+// PWM
+static const int PWM_FREQ = 1000; // para teste visual com LED, 1kHz é melhor
+static const int PWM_RES  = 8;    // 8 bits -> 0..255
 
-// ---------- PARAMETROS DE LEITURA ----------
-const uint32_t TIMEOUT_PULSE_US = 8000; // timeout reduzido para caber no periodo
+// ---------------- TEMPOS ----------------
+const TickType_t PERIODO_SENSOR_TICKS = pdMS_TO_TICKS(50);
+const TickType_t PERIODO_MOTOR_TICKS  = pdMS_TO_TICKS(20);
+const TickType_t PERIODO_LOG_TICKS    = pdMS_TO_TICKS(200);
 
-// ---------- CONTROLE ----------
-const float DISTANCIA_STOP_CM = 5.0;    // distancia minima de seguranca
-const float DISTANCIA_MAX_CM = 100.0;   // distancia maxima considerada
-const float K_EXP = 0.05;               // ganho da curva exponencial
-const int DUTY_MIN = 0;                 // limite inferior de duty
-const int DUTY_MAX = 255;               // limite superior de duty
+// ---------------- DISTANCIAS COMPARTILHADAS ----------------
+volatile float dF = -1, dT = -1, dE = -1, dD = -1;
+SemaphoreHandle_t mDist;
 
-// ---------- ESTATISTICAS ----------
-enum EstatId { EST_SF, EST_ST, EST_SE, EST_SD, EST_CTRL, EST_LOG, EST_COUNT };
-uint64_t estatMin[EST_COUNT];
-uint64_t estatMax[EST_COUNT];
-uint64_t estatSum[EST_COUNT];
-bool estatSeen[EST_COUNT];
-uint64_t inicioRelUs = 0;
-uint32_t ciclos[EST_COUNT];
-uint32_t misses[EST_COUNT];
-int64_t lastSlackUs[EST_COUNT];
+// ---------------- CONTROLE ----------------
+const float DISTANCIA_STOP_CM = 5.0;
+const float DISTANCIA_MAX_CM  = 100.0;
+const float K_EXP             = 0.05;
+const int DUTY_MIN            = 0;
+const int DUTY_MAX            = 255;
 
-void resetEstat() {
-  for (int i = 0; i < EST_COUNT; i++) {
-    estatMin[i] = UINT64_MAX;
-    estatMax[i] = 0;
-    estatSum[i] = 0;
-    estatSeen[i] = false;
-    ciclos[i] = 0;
-    misses[i] = 0;
-    lastSlackUs[i] = 0;
-  }
+// ---------------- HANDLES DAS TASKS ----------------
+TaskHandle_t thSensorF = nullptr;
+TaskHandle_t thSensorT = nullptr;
+TaskHandle_t thSensorE = nullptr;
+TaskHandle_t thSensorD = nullptr;
+TaskHandle_t thMotores = nullptr;
+TaskHandle_t thLog     = nullptr;
+
+// ---------------- MEDIÇÃO DE TEMPO (por task) ----------------
+typedef struct {
+  volatile uint32_t last_us = 0;
+  volatile uint32_t max_us  = 0;
+  volatile uint64_t sum_us  = 0;
+  volatile uint32_t samples = 0;
+} TaskTiming;
+
+TaskTiming tmSensorF, tmSensorT, tmSensorE, tmSensorD, tmMotores, tmLog;
+
+static inline void timing_begin(int64_t &t0) {
+  t0 = esp_timer_get_time(); // micros
 }
 
-inline void atualizaEstat(int id, uint64_t durUs) {
-  estatSeen[id] = true;
-  if (durUs < estatMin[id]) estatMin[id] = durUs;
-  if (durUs > estatMax[id]) estatMax[id] = durUs;
-  estatSum[id] += durUs;
+static inline void timing_end(TaskTiming &tm, int64_t t0) {
+  int64_t t1 = esp_timer_get_time();
+  uint32_t dur = (uint32_t)(t1 - t0);
+  tm.last_us = dur;
+  if (dur > tm.max_us) tm.max_us = dur;
+  tm.sum_us += dur;
+  tm.samples++;
 }
 
-void printMinMedMax(const char* nome, int id) {
-  Serial.print(nome);
-  Serial.print(":");
-  if (!estatSeen[id] || ciclos[id] == 0) {
-    Serial.print("-/-/-");
-    return;
-  }
-  uint64_t med = estatSum[id] / ciclos[id];
-  Serial.print(estatMin[id]);
-  Serial.print("/");
-  Serial.print(med);
-  Serial.print("/");
-  Serial.print(estatMax[id]);
-}
-
-// ---------- SINCRONIZACAO ----------
-portMUX_TYPE muxDist = portMUX_INITIALIZER_UNLOCKED;
-float dF = 0, dT = 0, dE = 0, dD = 0;
-
-// ---------- LEITURA DE DISTANCIA ----------
-float medirDistancia(int trig, int echo) {
+// ---------------- ULTRASSOM ----------------
+// pulseIn é bloqueante; ok para experimento, mas pode gerar jitter.
+float medirDistanciaCM(int trig, int echo) {
   digitalWrite(trig, LOW);
   delayMicroseconds(2);
   digitalWrite(trig, HIGH);
   delayMicroseconds(10);
   digitalWrite(trig, LOW);
 
-  long dur = pulseIn(echo, HIGH, TIMEOUT_PULSE_US);
+  long dur = pulseIn(echo, HIGH, 30000); // timeout 30ms
+  if (dur <= 0) return -1.0f;
   return dur * 0.034f / 2.0f;
 }
 
-// ---------- LEI DE CONTROLE ----------
 int controlePWM(float d) {
-  if (d <= 0) return 0;
+  if (d <= 0) return 0; // inválida
+  if (d <= DISTANCIA_STOP_CM) return 0;
+
   float dClamped = constrain(d, DISTANCIA_STOP_CM, DISTANCIA_MAX_CM);
   float x = dClamped - DISTANCIA_STOP_CM;
   float fatorExp = 1.0f - expf(-K_EXP * x);
   int pwm = DUTY_MIN + (int)((DUTY_MAX - DUTY_MIN) * fatorExp + 0.5f);
-  if (d <= DISTANCIA_STOP_CM) return 0;
   return constrain(pwm, DUTY_MIN, DUTY_MAX);
 }
 
-// ---------- PARAMETROS DE TAREFA ----------
-struct SensorParam {
+static inline void aplicarPWM(int pino, int duty) {
+  duty = constrain(duty, 0, 255);
+  ledcWrite(pino, duty); // Arduino-ESP32 v3.x -> escreve por PINO
+}
+
+// ---------------- TASK SENSOR (genérica) ----------------
+struct SensorCfg {
   int trig;
   int echo;
-  float* distRef;
-  const char* nome;
-  EstatId estatId;
+  volatile float *dst;
+  TaskTiming *tm;
 };
 
-// ---------- TAREFAS ----------
-void tarefaSensor(void* pv) {
-  SensorParam* p = (SensorParam*)pv;
-  TickType_t xLastWake = xTaskGetTickCount();
-  const TickType_t periodo = pdMS_TO_TICKS(PERIODO_SENSOR_MS);
-  const uint32_t periodoUs = PERIODO_SENSOR_MS * 1000UL;
+void taskSensor(void *arg) {
+  SensorCfg *cfg = (SensorCfg*)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+
   for (;;) {
-    uint64_t t0 = esp_timer_get_time();
-    float d = medirDistancia(p->trig, p->echo);
-    portENTER_CRITICAL(&muxDist);
-    *(p->distRef) = d;
-    portEXIT_CRITICAL(&muxDist);
-    uint64_t dur = esp_timer_get_time() - t0;
-    atualizaEstat(p->estatId, dur);
-    ciclos[p->estatId]++;
-    int64_t slack = (int64_t)periodoUs - (int64_t)dur;
-    lastSlackUs[p->estatId] = slack;
-    if (slack < 0) misses[p->estatId]++;
-    vTaskDelayUntil(&xLastWake, periodo);
+    int64_t t0;
+    timing_begin(t0);
+
+    float d = medirDistanciaCM(cfg->trig, cfg->echo);
+
+    // IMPORTANTE: se leitura inválida, NÃO zera; mantém última válida
+    if (d > 0) {
+      xSemaphoreTake(mDist, portMAX_DELAY);
+      *(cfg->dst) = d;
+      xSemaphoreGive(mDist);
+    }
+
+    timing_end(*(cfg->tm), t0);
+    vTaskDelayUntil(&lastWake, PERIODO_SENSOR_TICKS);
   }
 }
 
-void tarefaControle(void* pv) {
-  (void)pv;
-  TickType_t xLastWake = xTaskGetTickCount();
-  const TickType_t periodo = pdMS_TO_TICKS(PERIODO_CONTROLE_MS);
-  const uint32_t periodoUs = PERIODO_CONTROLE_MS * 1000UL;
+// ---------------- TASK MOTORES ----------------
+void taskMotores(void *arg) {
+  (void)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+
   for (;;) {
-    portENTER_CRITICAL(&muxDist);
-    float lf = dF, lt = dT, le = dE, ld = dD;
-    portEXIT_CRITICAL(&muxDist);
-    uint64_t t0 = esp_timer_get_time();
-    analogWrite(motores[0], controlePWM(lf));
-    analogWrite(motores[1], controlePWM(lt));
-    analogWrite(motores[2], controlePWM(le));
-    analogWrite(motores[3], controlePWM(ld));
-    uint64_t dur = esp_timer_get_time() - t0;
-    atualizaEstat(EST_CTRL, dur);
-    ciclos[EST_CTRL]++;
-    int64_t slack = (int64_t)periodoUs - (int64_t)dur;
-    lastSlackUs[EST_CTRL] = slack;
-    if (slack < 0) misses[EST_CTRL]++;
-    vTaskDelayUntil(&xLastWake, periodo);
+    int64_t t0;
+    timing_begin(t0);
+
+    float lf, lt, le, ld;
+    xSemaphoreTake(mDist, portMAX_DELAY);
+    lf = dF; lt = dT; le = dE; ld = dD;
+    xSemaphoreGive(mDist);
+
+    int p0 = controlePWM(lf);
+    int p1 = controlePWM(lt);
+    int p2 = controlePWM(le);
+    int p3 = controlePWM(ld);
+
+    aplicarPWM(motores[0], p0);
+    aplicarPWM(motores[1], p1);
+    aplicarPWM(motores[2], p2);
+    aplicarPWM(motores[3], p3);
+
+    timing_end(tmMotores, t0);
+    vTaskDelayUntil(&lastWake, PERIODO_MOTOR_TICKS);
   }
 }
 
-void tarefaLog(void* pv) {
-  (void)pv;
-  TickType_t xLastWake = xTaskGetTickCount();
-  const TickType_t periodo = pdMS_TO_TICKS(PERIODO_LOG_MS);
-  const uint32_t periodoUs = PERIODO_LOG_MS * 1000UL;
+// ---------------- TASK LOG ----------------
+void taskLog(void *arg) {
+  (void)arg;
+  TickType_t lastWake = xTaskGetTickCount();
+
   for (;;) {
-    uint64_t t0 = esp_timer_get_time();
-    portENTER_CRITICAL(&muxDist);
-    float lf = dF, lt = dT, le = dE, ld = dD;
-    portEXIT_CRITICAL(&muxDist);
-    Serial.print("[LOG] F: "); Serial.print(lf);
-    Serial.print(" | T: "); Serial.print(lt);
-    Serial.print(" | E: "); Serial.print(le);
-    Serial.print(" | D: "); Serial.print(ld);
-    Serial.print(" | Tcomp(us) min/med/max ");
-    printMinMedMax("SF", EST_SF); Serial.print(" ");
-    printMinMedMax("ST", EST_ST); Serial.print(" ");
-    printMinMedMax("SE", EST_SE); Serial.print(" ");
-    printMinMedMax("SD", EST_SD); Serial.print(" ");
-    printMinMedMax("CTRL", EST_CTRL);
-    Serial.print(" | ciclos SF/ST/SE/SD/CTRL: ");
-    Serial.print(ciclos[EST_SF]); Serial.print("/");
-    Serial.print(ciclos[EST_ST]); Serial.print("/");
-    Serial.print(ciclos[EST_SE]); Serial.print("/");
-    Serial.print(ciclos[EST_SD]); Serial.print("/");
-    Serial.print(ciclos[EST_CTRL]);
-    Serial.print(" | misses SF/ST/SE/SD/CTRL: ");
-    Serial.print(misses[EST_SF]); Serial.print("/");
-    Serial.print(misses[EST_ST]); Serial.print("/");
-    Serial.print(misses[EST_SE]); Serial.print("/");
-    Serial.print(misses[EST_SD]); Serial.print("/");
-    Serial.print(misses[EST_CTRL]);
-    Serial.print(" | slack(us) ultimo SF/ST/SE/SD/CTRL: ");
-    Serial.print(lastSlackUs[EST_SF]); Serial.print("/");
-    Serial.print(lastSlackUs[EST_ST]); Serial.print("/");
-    Serial.print(lastSlackUs[EST_SE]); Serial.print("/");
-    Serial.print(lastSlackUs[EST_SD]); Serial.print("/");
-    Serial.print(lastSlackUs[EST_CTRL]);
-    Serial.println();
-    resetEstat(); // zera min/max/misses/ciclos/slack para a proxima janela
-    uint64_t dur = esp_timer_get_time() - t0;
-    atualizaEstat(EST_LOG, dur);
-    ciclos[EST_LOG]++;
-    int64_t slack = (int64_t)periodoUs - (int64_t)dur;
-    lastSlackUs[EST_LOG] = slack;
-    if (slack < 0) misses[EST_LOG]++;
-    vTaskDelayUntil(&xLastWake, periodo);
+    int64_t t0;
+    timing_begin(t0);
+
+    float lf, lt, le, ld;
+    xSemaphoreTake(mDist, portMAX_DELAY);
+    lf = dF; lt = dT; le = dE; ld = dD;
+    xSemaphoreGive(mDist);
+
+    int p0 = controlePWM(lf);
+    int p1 = controlePWM(lt);
+    int p2 = controlePWM(le);
+    int p3 = controlePWM(ld);
+
+    Serial.printf("\n[DIST] F=%.2f T=%.2f E=%.2f D=%.2f\n", lf, lt, le, ld);
+    Serial.printf("[PWM ] M0=%d M1=%d M2=%d M3=%d\n", p0, p1, p2, p3);
+
+    auto pr = [](const char* n, const TaskTiming& tm){
+      uint32_t avg = (tm.samples > 0) ? (uint32_t)(tm.sum_us / tm.samples) : 0;
+      Serial.printf("  %-8s last=%4u us | max=%4u us | avg=%4u us | n=%u\n",
+                    n, tm.last_us, tm.max_us, avg, tm.samples);
+    };
+
+    pr("SenF", tmSensorF);
+    pr("SenT", tmSensorT);
+    pr("SenE", tmSensorE);
+    pr("SenD", tmSensorD);
+    pr("Mot",  tmMotores);
+    pr("Log",  tmLog);
+
+    timing_end(tmLog, t0);
+    vTaskDelayUntil(&lastWake, PERIODO_LOG_TICKS);
   }
 }
 
-// ---------- SETUP ----------
+// ---------------- SETUP/LOOP ----------------
 void setup() {
   Serial.begin(115200);
-  resetEstat();
-  inicioRelUs = esp_timer_get_time();
 
+  // Ultrassom
   pinMode(TRIG_F, OUTPUT); pinMode(ECHO_F, INPUT);
   pinMode(TRIG_T, OUTPUT); pinMode(ECHO_T, INPUT);
   pinMode(TRIG_E, OUTPUT); pinMode(ECHO_E, INPUT);
   pinMode(TRIG_D, OUTPUT); pinMode(ECHO_D, INPUT);
-  for (int i = 0; i < 4; i++) pinMode(motores[i], OUTPUT);
 
-  static SensorParam params[] = {
-    {TRIG_F, ECHO_F, &dF, "SF", EST_SF},
-    {TRIG_T, ECHO_T, &dT, "ST", EST_ST},
-    {TRIG_E, ECHO_E, &dE, "SE", EST_SE},
-    {TRIG_D, ECHO_D, &dD, "SD", EST_SD},
-  };
+  // Mutex
+  mDist = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(tarefaSensor, "SF", 2048, &params[0], 2, nullptr, 1);
-  xTaskCreatePinnedToCore(tarefaSensor, "ST", 2048, &params[1], 2, nullptr, 1);
-  xTaskCreatePinnedToCore(tarefaSensor, "SE", 2048, &params[2], 2, nullptr, 1);
-  xTaskCreatePinnedToCore(tarefaSensor, "SD", 2048, &params[3], 2, nullptr, 1);
-  xTaskCreatePinnedToCore(tarefaControle, "CTRL", 2048, nullptr, 3, nullptr, 1);
-  xTaskCreatePinnedToCore(tarefaLog, "LOG", 2048, nullptr, 1, nullptr, 1);
+  // PWM (Arduino-ESP32 v3.x): anexa PWM diretamente ao PINO
+  ledcAttach(motores[0], PWM_FREQ, PWM_RES);
+  ledcAttach(motores[1], PWM_FREQ, PWM_RES);
+  ledcAttach(motores[2], PWM_FREQ, PWM_RES);
+  ledcAttach(motores[3], PWM_FREQ, PWM_RES);
+
+  // Para garantir que existe “sinal” visível no começo (teste LED):
+  // comente se não quiser.
+  ledcWrite(motores[0], 64); // ~25%
+  delay(300);
+  ledcWrite(motores[0], 0);
+
+  // Configs estáticas (não podem ser locais da função)
+  static SensorCfg cfgF = {TRIG_F, ECHO_F, &dF, &tmSensorF};
+  static SensorCfg cfgT = {TRIG_T, ECHO_T, &dT, &tmSensorT};
+  static SensorCfg cfgE = {TRIG_E, ECHO_E, &dE, &tmSensorE};
+  static SensorCfg cfgD = {TRIG_D, ECHO_D, &dD, &tmSensorD};
+
+  // Cria tasks (pode ajustar prioridades)
+  // Sugestão: motores prioridade maior que sensores; log menor.
+  xTaskCreatePinnedToCore(taskSensor, "SensorF", 4096, &cfgF, 2, &thSensorF, 1);
+  xTaskCreatePinnedToCore(taskSensor, "SensorT", 4096, &cfgT, 2, &thSensorT, 1);
+  xTaskCreatePinnedToCore(taskSensor, "SensorE", 4096, &cfgE, 2, &thSensorE, 1);
+  xTaskCreatePinnedToCore(taskSensor, "SensorD", 4096, &cfgD, 2, &thSensorD, 1);
+
+  xTaskCreatePinnedToCore(taskMotores, "Motores", 4096, nullptr, 3, &thMotores, 1);
+  xTaskCreatePinnedToCore(taskLog,     "Log",     4096, nullptr, 1, &thLog,     1);
+
+  Serial.println("Sistema FreeRTOS iniciado (sem Supervisor).");
 }
 
-// ---------- LOOP ----------
 void loop() {
+  // FreeRTOS roda tudo; loop vazio.
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
