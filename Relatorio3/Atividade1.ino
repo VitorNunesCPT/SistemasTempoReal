@@ -3,9 +3,11 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+// ================= MAPEAMENTO DE PINOS =================
 static const uint8_t BUTTON_PINS[8] = { 2, 4, 5, 18, 19, 21, 22, 23 };
 static const uint8_t LED_PINS[8]    = { 12, 13, 14, 15, 25, 26, 27, 32 };
 
+// ======================== FILA =========================
 QueueHandle_t xQueue_LED;
 
 // ================= TAREFA PRODUTORA ====================
@@ -14,24 +16,31 @@ void tarefa_Ler_botoes(void *pv) {
   uint8_t ultimoValor = 0xFF;
 
   for (;;) {
+    // 1. MEDIÇÃO DO TEMPO DE COMPUTAÇÃO (Processamento)
+    uint32_t iniComp = micros();
+    
     sLEDs = 0;
     for (uint8_t i = 0; i < 8; i++) {
       if (digitalRead(BUTTON_PINS[i]) == LOW) sLEDs |= (1 << i);
     }
+    
+    uint32_t fimComp = micros();
 
+    // Enviar apenas se houver mudança
     if (sLEDs != ultimoValor) {
       if (xQueue_LED != NULL) {
-        // --- INÍCIO DA MEDIÇÃO ---
-        TickType_t tempoInicio = xTaskGetTickCount();
         
-        Serial.println(">>> Tentando ENVIAR...");
+        // 2. MEDIÇÃO DO TEMPO DE ESPERA (Bloqueio da Fila)
+        uint32_t iniWait = millis();
         
-        // portMAX_DELAY fará a tarefa esperar o tempo que for preciso
+        Serial.println("\n[PRODUTOR] Tentando enviar para a fila...");
+        
+        // portMAX_DELAY: Se a fila encher, a tarefa trava aqui (Risco de Deadlock)
         if (xQueueSend(xQueue_LED, &sLEDs, portMAX_DELAY) == pdPASS) {
-          TickType_t tempoFim = xTaskGetTickCount();
-          Serial.print("[ESCRITA] Sucesso! Tempo de espera: ");
-          Serial.print(tempoFim - tempoInicio);
-          Serial.println(" ticks.");
+          uint32_t fimWait = millis();
+          
+          Serial.print(">> [INFO] Computacao: "); Serial.print(fimComp - iniComp); Serial.println(" us");
+          Serial.print(">> [INFO] Espera p/ Escrita: "); Serial.print(fimWait - iniWait); Serial.println(" ms");
         }
       }
       ultimoValor = sLEDs;
@@ -46,47 +55,56 @@ void LED_acende(void *pv) {
 
   for (;;) {
     if (xQueue_LED != NULL) {
-      // --- INÍCIO DA MEDIÇÃO ---
-      TickType_t tempoInicio = xTaskGetTickCount();
-
-      // Tentativa de leitura com timeout de 10 ticks (conforme slide)
+      
+      // 1. MEDIÇÃO DO TEMPO DE ESPERA (Leitura)
+      uint32_t iniWait = millis();
+      
+      // Espera de 10 ticks conforme slide
       if (xQueueReceive(xQueue_LED, &rLEDs, (TickType_t)10) == pdPASS) {
-        TickType_t tempoFim = xTaskGetTickCount();
-        
-        Serial.print("[LEITURA] Recebido: ");
-        Serial.print(rLEDs, BIN);
-        Serial.print(" | Esperou: ");
-        Serial.print(tempoFim - tempoInicio);
-        Serial.println(" ticks.");
+        uint32_t fimWait = millis();
 
+        // 2. MEDIÇÃO DO TEMPO DE COMPUTAÇÃO (Atualizar Hardware)
+        uint32_t iniComp = micros();
         for (uint8_t i = 0; i < 8; i++) {
           digitalWrite(LED_PINS[i], (rLEDs & (1 << i)) ? HIGH : LOW);
         }
+        uint32_t fimComp = micros();
 
-        // Simulação de processamento lento para forçar a fila a encher
-        // Se você comentar a linha abaixo, a espera de escrita será quase 0.
-        vTaskDelay(pdMS_TO_TICKS(1000)); 
-      } else {
-        // Se entrar aqui, significa que a fila estava vazia e os 10 ticks passaram
-        // Serial.println("[LEITURA] Fila vazia (timeout 10 ticks)");
+        Serial.println("\n[CONSUMIDOR] Dado recebido e processado!");
+        Serial.print("<< [INFO] Espera p/ Leitura: "); Serial.print(fimWait - iniWait); Serial.println(" ms");
+        Serial.print("<< [INFO] Computacao: "); Serial.print(fimComp - iniComp); Serial.println(" us");
+
+        // ATRASO PROPOSITAL: Ative para simular lentidão e ver a fila encher (e o produtor esperar)
+        //vTaskDelay(pdMS_TO_TICKS(2000)); 
       }
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
+// ======================== SETUP =========================
 void setup() {
   Serial.begin(115200);
+
   for (uint8_t i = 0; i < 8; i++) {
     pinMode(BUTTON_PINS[i], INPUT_PULLUP);
     pinMode(LED_PINS[i], OUTPUT);
+    digitalWrite(LED_PINS[i], LOW);
   }
 
-  // Fila de tamanho 1 para facilitar a observação do bloqueio
+  // Fila tamanho 1 (Máximo risco de bloqueio/deadlock)
   xQueue_LED = xQueueCreate(1, sizeof(uint8_t));
 
-  xTaskCreate(tarefa_Ler_botoes, "Botoes", 2048, NULL, 1, NULL);
-  xTaskCreate(LED_acende,       "LEDs",   2048, NULL, 1, NULL);
+  if (xQueue_LED == NULL) {
+    Serial.println("Erro ao criar a fila!");
+    while (true);
+  }
+
+  // Criação das tarefas
+  xTaskCreate(tarefa_Ler_botoes, "Ler_Botoes", 2048, NULL, 1, NULL);
+  xTaskCreate(LED_acende,       "LED_Acende",  2048, NULL, 1, NULL);
+
+  Serial.println("Sistema Iniciado. Monitore os tempos abaixo:");
 }
 
 void loop() {}
