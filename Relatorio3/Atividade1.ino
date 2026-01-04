@@ -88,6 +88,51 @@ void LED_acende(void *pv) {
   }
 }
 
+// ============ MONITOR DA FILA ==========
+void monitorFila(void *pv) {
+  const TickType_t periodo = pdMS_TO_TICKS(1000);
+  uint32_t lastSendOk = 0;
+  uint32_t lastSendTo = 0;
+  uint32_t lastRecvOk = 0;
+  uint32_t lastRecvTo = 0;
+
+  for (;;) {
+    if (xQueue_LED != NULL) {
+      UBaseType_t pendentes = uxQueueMessagesWaiting(xQueue_LED);
+      uint32_t sendOkNow = sendOk;
+      uint32_t sendToNow = sendTimeouts;
+      uint32_t recvOkNow = recvOk;
+      uint32_t recvToNow = recvTimeouts;
+      uint32_t dSendOk = sendOkNow - lastSendOk;
+      uint32_t dSendTo = sendToNow - lastSendTo;
+      uint32_t dRecvOk = recvOkNow - lastRecvOk;
+      uint32_t dRecvTo = recvToNow - lastRecvTo;
+
+      Serial.print("fila=");
+      Serial.print(pendentes);
+      Serial.print(" send_ok=");
+      Serial.print(sendOkNow);
+      Serial.print(" send_to=");
+      Serial.print(sendToNow);
+      Serial.print(" recv_ok=");
+      Serial.print(recvOkNow);
+      Serial.print(" recv_to=");
+      Serial.println(recvToNow);
+
+      if (dSendOk == 0 && dRecvOk == 0 && (dSendTo > 0 || dRecvTo > 0)) {
+        Serial.println("Possivel deadlock: sem progresso no ultimo periodo");
+      }
+
+      lastSendOk = sendOkNow;
+      lastSendTo = sendToNow;
+      lastRecvOk = recvOkNow;
+      lastRecvTo = recvToNow;
+    }
+
+    vTaskDelay(periodo);
+  }
+}
+
 // ================= SETUP =================
 void setup() {
   Serial.begin(115200);
@@ -111,6 +156,7 @@ void setup() {
   // Consumidor com prioridade maior para reduzir latencia nos LEDs.
   xTaskCreate(_Ler_botoes, "Botoes", 2048, NULL, 1, NULL);
   xTaskCreate(LED_acende,  "LEDs",   2048, NULL, 2, NULL);
+  xTaskCreate(monitorFila, "Mon",    2048, NULL, 0, NULL);
 }
 
 void loop() {
